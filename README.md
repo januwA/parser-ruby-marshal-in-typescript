@@ -1,0 +1,2 @@
+- https://szsu.wordpress.com/2010/08/10/marshal_dump/
+- https://ilyabylich.svbtle.com/ruby-marshalling-from-a-to-z
