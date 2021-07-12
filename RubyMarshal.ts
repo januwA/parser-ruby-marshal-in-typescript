@@ -1,6 +1,5 @@
+import { kstream } from "ajanuw-kstream";
 export class RubyMarshal {
-  private td = new TextDecoder();
-
   // 已序列化的符号
   private SYMBOL_CACHE: string[] = [];
 
@@ -15,30 +14,14 @@ export class RubyMarshal {
     return obj;
   }
 
-  constructor(public v: DataView, public offset: number = 2) {}
-
-  private _getByte(signde = false) {
-    const b = signde
-      ? this.v.getInt8(this.offset)
-      : this.v.getUint8(this.offset);
-    this.offset++;
-    return b;
-  }
-
-  private _readStr(len: number) {
-    const bytes = [];
-    for (let i = 0; i < len; i++) {
-      bytes.push(this._getByte());
-    }
-    return this.td.decode(new Uint8Array(bytes));
-  }
+  constructor(public ks: kstream) {}
 
   private throw_error(name: string) {
-    return `Error ${name} offset:${this.offset} 0x${this.offset.toString(16)}`;
+    return `Error ${name} offset:${this.ks.pos} 0x${this.ks.pos.toString(16)}`;
   }
 
   public parser(ic: boolean = false): any {
-    const type = this._getByte();
+    const type = this.ks.u8;
 
     switch (type) {
       case 0x5b:
@@ -51,19 +34,19 @@ export class RubyMarshal {
         return this.parserSymbolLink();
 
       case 0x46:
-        return false;
+        return { Offset: this.ks.pos - 1, value: false };
 
       case 0x54:
-        return true;
+        return { Offset: this.ks.pos - 1, value: true };
 
       case 0x30:
-        return null;
+        return { Offset: this.ks.pos - 1, value: null };
 
       case 0x69:
-        return this.parserFixnum();
+        return { Offset: this.ks.pos, value: this.parserFixnum() };
 
       case 0x66:
-        return this.parserFloat();
+        return { Offset: this.ks.pos + 1, value: this.parserFloat() };
 
       case 0x7b:
         return this.parserHash();
@@ -75,7 +58,7 @@ export class RubyMarshal {
         return this.parserObjectLink();
 
       case 0x22:
-        return this.parserString();
+        return { Offset: this.ks.pos + 1, value: this.parserString() };
 
       case 0x6f:
         return this.parserO();
@@ -112,10 +95,10 @@ export class RubyMarshal {
 
       case 0x04:
         // 在二进制文件中存在多个marshal
-        if (this.v.getUint8(this.offset) === 0x08) {
-          const m = new RubyMarshal(this.v, ++this.offset);
+        if (this.ks.pu8() === 0x08) {
+          this.ks.pos++;
+          const m = new RubyMarshal(this.ks);
           const rr = m.parser();
-          this.offset = m.offset;
           return rr;
         }
 
@@ -131,7 +114,6 @@ export class RubyMarshal {
         break;
     }
 
-    this.offset--;
     throw this.throw_error("parser");
   }
 
@@ -149,12 +131,12 @@ export class RubyMarshal {
   }
 
   private parserSymbol(): string {
-    return this.cache_symbol(this._readStr(this.parserFixnum()));
+    return this.cache_symbol(this.ks.readString(this.parserFixnum()));
   }
 
   private parserFixnum(): number {
     // Fixnum 最多只可能占 4 个字节
-    let x = this._getByte(true);
+    let x = this.ks.i8;
 
     // 有 5 种不同的情况
     if (x === 0) return 0;
@@ -167,7 +149,7 @@ export class RubyMarshal {
       let result = -1;
       for (let i = 0; i < Math.abs(x); i++) {
         const a = ~(0xff << (8 * i));
-        const b = this._getByte() << (8 * i);
+        const b = this.ks.u8 << (8 * i);
         result = (result & a) | b;
       }
       return result;
@@ -175,7 +157,7 @@ export class RubyMarshal {
       // 接下来是有 |x| 个字节的正整数
       let result = 0;
       for (let i = 0; i < x; i++) {
-        result |= this._getByte() << (8 * i);
+        result |= this.ks.u8 << (8 * i);
       }
       return result;
     } else if (5 <= x && x <= 127) {
@@ -188,7 +170,9 @@ export class RubyMarshal {
 
   private parserFloat(): number {
     // 浮点字符串
-    return parseFloat(this.cache_object(this._readStr(this.parserFixnum())));
+    return parseFloat(
+      this.cache_object(this.ks.readString(this.parserFixnum()))
+    );
   }
 
   private parserHashNew() {
@@ -237,7 +221,7 @@ export class RubyMarshal {
 
   private parserString() {
     // "string"
-    return this._readStr(this.parserFixnum());
+    return this.ks.readString(this.parserFixnum());
   }
 
   // https://www.codeproject.com/Answers/5282788/Decode-a-byte-array-to-a-signed-integer-up-to-64-b#answer3
@@ -245,12 +229,12 @@ export class RubyMarshal {
     // 123456789 ** -2
     // 123456789 ** 2
 
-    const signd = this._getByte();
+    const signd = this.ks.u8;
     let x = this.parserFixnum() * 2;
 
     let result = 0;
     for (let i = 0; i < x; i++) {
-      result += this._getByte() * 256 ** i;
+      result += this.ks.u8 * 256 ** i;
 
       // console.log(
       //   result.toString(16).toUpperCase().padStart(16, "0"),
@@ -262,19 +246,19 @@ export class RubyMarshal {
   }
 
   private parserClass() {
-    this._readStr(this.parserFixnum());
+    this.ks.readString(this.parserFixnum());
     return this.cache_object({});
   }
 
   private parserModule() {
-    this._readStr(this.parserFixnum());
+    this.ks.readString(this.parserFixnum());
     return this.cache_object({});
   }
 
   private parserRegexp() {
     const len = this.parserFixnum();
-    const r = this._readStr(len);
-    const m = this._getByte();
+    const r = this.ks.readString(len);
+    const m = this.ks.u8;
     let flags = "";
 
     if (m & (1 << 2)) {
@@ -322,15 +306,18 @@ export class RubyMarshal {
     const name = this.parser(); // name
     let size = this.parserFixnum(); // size
 
-    if (
-      this.v.getUint8(this.offset) === 0x04 &&
-      this.v.getUint8(this.offset + 1) === 0x08
-    ) {
-      return new RubyMarshal(this.v, ++this.offset).parser();
+    if (this.ks.pi8() === 0x04 && this.ks.pi8(1) === 0x08) {
+      return this.parser();
     } else {
       // 不知道该怎么解析的数据
       const bytes = [];
-      while (size--) bytes.push(this._getByte());
+      if (size < 10) {
+        while (size--) bytes.push(this.ks.u8);
+      } else {
+        // 优化json输出
+        this.ks.pos += size;
+        bytes.push("...");
+      }
       return {
         _dump: name,
         bytes,
